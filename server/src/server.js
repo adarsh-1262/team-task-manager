@@ -18,9 +18,24 @@ const app = express();
 const port = process.env.PORT || 5000;
 
 app.use(helmet());
+
+// Configure CORS to allow multiple origins
+const allowedOrigins = [
+  "http://localhost:5173",           // Local development
+  "http://localhost:3000",           // Alternative local
+  process.env.CLIENT_URL || "http://localhost:5173" // Production frontend from env
+];
+
 app.use(
   cors({
-    origin: process.env.CLIENT_URL || "http://localhost:5173",
+    origin: (origin, callback) => {
+      // Allow requests with no origin (like mobile apps, curl requests)
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error("Not allowed by CORS"));
+      }
+    },
     credentials: true
   })
 );
