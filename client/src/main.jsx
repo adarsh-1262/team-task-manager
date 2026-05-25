@@ -184,7 +184,7 @@ function App() {
             <span className="brandMark">TT</span>
             <div>
               <h1>Team Task Manager</h1>
-              <p>MERN project workspace for teams, tasks, role-based access, and progress tracking.</p>
+              <p>A project workspace for teams, tasks, role-based access, and progress tracking.</p>
             </div>
           </div>
           <div className="featureGrid">

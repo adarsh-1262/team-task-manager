@@ -11,6 +11,7 @@ export function BillingDashboard({ token }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [showUpgradeModal, setShowUpgradeModal] = useState(false);
+  const [debugInfo, setDebugInfo] = useState(null);  // ✅ Store debug info
 
   async function fetchSubscription() {
     try {
@@ -28,6 +29,23 @@ export function BillingDashboard({ token }) {
 
       const data = await response.json();
       console.log("Subscription data received:", data);
+      console.log("Current tier:", data.subscription?.currentTier);
+      console.log("Member limit:", data.subscription?.memberLimit);
+      console.log("Status:", data.subscription?.status);
+      console.log("Plan tier from response:", data.plan?.tier);
+      console.log("Plan member limit from response:", data.plan?.memberLimit);
+      console.log("Debug info:", data.debug);  // ✅ Log debug info
+      
+      // ✅ Store debug info for display
+      setDebugInfo(data.debug);
+      
+      // ✅ Validate tier consistency
+      if (data.subscription) {
+        if (data.subscription.currentTier !== data.plan?.tier) {
+          console.warn("Tier mismatch detected! Subscription tier:", data.subscription.currentTier, "Plan tier:", data.plan?.tier);
+          console.warn("This is expected - using subscription's stored tier:", data.subscription.currentTier);
+        }
+      }
       
       setSubscription(data.subscription);
       setPlan(data.plan);
@@ -257,9 +275,14 @@ export function BillingDashboard({ token }) {
             setShowUpgradeModal(false);
           }}
           onUpgradeSuccess={() => {
-            console.log("Upgrade success - closing modal and refetching subscription");
-            setShowUpgradeModal(false);
-            fetchSubscription();
+            console.log("Upgrade success callback triggered");
+            setShowUpgradeModal(false); // Close modal first
+            
+            // Then refetch with a small delay to ensure modal is gone
+            setTimeout(() => {
+              console.log("Refetching subscription after payment...");
+              fetchSubscription();
+            }, 300);
           }}
           token={token}
         />
@@ -291,17 +314,33 @@ function UpgradeModal({ currentPlan, currentTier, memberCount, billingCycle, onC
   async function handleUpgrade(plan) {
     setLoading(true);
     setError("");
+    
+    // ✅ Capture the selected tier NOW, before any async operations
+    const selectedTierForPayment = plan.tier;
+    const selectedCycleForPayment = selectedCycle;
+    
     try {
+      console.log("User selected plan:", plan);
+      console.log("Selected plan tier:", plan.tier);
+      console.log("Selected plan type:", plan.type);
+      console.log("Selected plan memberLimit:", plan.memberLimit);
+      console.log("🔒 Captured tier for payment:", selectedTierForPayment);
+      
+      const requestBody = {
+        memberCount: Math.ceil(memberCount),
+        billingCycle: selectedCycleForPayment,
+        selectedTier: selectedTierForPayment  // ✅ Send the selected tier to backend
+      };
+      
+      console.log("Sending create-order request with:", requestBody);
+      
       const response = await fetch(`${API_URL}/subscription/create-order`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${token}`,
           "Content-Type": "application/json"
         },
-        body: JSON.stringify({
-          memberCount: Math.ceil(memberCount),
-          billingCycle: selectedCycle
-        })
+        body: JSON.stringify(requestBody)
       });
 
       if (!response.ok) {
@@ -328,9 +367,16 @@ function UpgradeModal({ currentPlan, currentTier, memberCount, billingCycle, onC
           return;
         }
 
+        // ✅ Create a payment handler with captured tier
+        const createPaymentHandler = (capturedTier, capturedBillingCycle) => {
+          return async (response) => {
+            await handlePaymentSuccess(response, capturedTier, capturedBillingCycle);
+          };
+        };
+
         const razorpay = new window.Razorpay({
           ...data.checkoutOptions,
-          handler: handlePaymentSuccess,
+          handler: createPaymentHandler(selectedTierForPayment, selectedCycleForPayment),
           modal: {
             ondismiss: () => {
               console.log("Payment modal dismissed by user");
@@ -356,9 +402,11 @@ function UpgradeModal({ currentPlan, currentTier, memberCount, billingCycle, onC
     }
   }
 
-  async function handlePaymentSuccess(response) {
+  async function handlePaymentSuccess(response, capturedTierForPayment, capturedBillingCycleForPayment) {
     try {
       console.log("Payment response received:", response);
+      console.log("🔒 Using captured tier:", capturedTierForPayment);
+      console.log("🔒 Using captured billing cycle:", capturedBillingCycleForPayment);
 
       // Validate response has all required fields
       if (!response.razorpay_payment_id || !response.razorpay_order_id || !response.razorpay_signature) {
@@ -367,19 +415,24 @@ function UpgradeModal({ currentPlan, currentTier, memberCount, billingCycle, onC
 
       console.log("Verifying payment signature...");
 
+      const verifyBody = {
+        orderId: response.razorpay_order_id,
+        paymentId: response.razorpay_payment_id,
+        signature: response.razorpay_signature,
+        memberCount: Math.ceil(memberCount),
+        billingCycle: capturedBillingCycleForPayment,
+        selectedTier: capturedTierForPayment  // ✅ Use CAPTURED tier, not state
+      };
+
+      console.log("Sending verify-payment request with:", verifyBody);
+
       const verifyResponse = await fetch(`${API_URL}/subscription/verify-payment`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${token}`,
           "Content-Type": "application/json"
         },
-        body: JSON.stringify({
-          orderId: response.razorpay_order_id,
-          paymentId: response.razorpay_payment_id,
-          signature: response.razorpay_signature,
-          memberCount: Math.ceil(memberCount),
-          billingCycle: selectedCycle
-        })
+        body: JSON.stringify(verifyBody)
       });
 
       const verifyData = await verifyResponse.json();
@@ -391,13 +444,31 @@ function UpgradeModal({ currentPlan, currentTier, memberCount, billingCycle, onC
       }
 
       console.log("Payment verified successfully!", verifyData);
+      console.log("Subscription tier after payment:", verifyData.subscription?.currentTier);
+      console.log("Subscription member limit after payment:", verifyData.subscription?.memberLimit);
+      console.log("Subscription status after payment:", verifyData.subscription?.status);
+      
+      // ✅ Validate that tier was actually saved correctly
+      if (!verifyData.subscription || !verifyData.subscription.currentTier) {
+        console.error("Warning: Subscription tier not returned from server");
+      }
+      
+      if (verifyData.subscription?.currentTier !== capturedTierForPayment) {
+        console.error("❌ TIER MISMATCH! Expected tier:", capturedTierForPayment, "but got:", verifyData.subscription?.currentTier);
+      } else {
+        console.log("✅ Tier saved correctly:", verifyData.subscription?.currentTier);
+      }
+
       console.log("Calling onUpgradeSuccess to refresh UI...");
       
-      // Show success notification
-      setError(""); // Clear any errors
+      // ✅ Show success message with subscription details
+      setError(`✅ Payment successful! Subscription updated to Tier ${verifyData.subscription?.currentTier}`);
       
-      // Call parent's callback to close modal and refetch data
-      onUpgradeSuccess();
+      // Trigger parent callback - wait a moment then refresh subscription
+      setTimeout(() => {
+        console.log("Triggering onUpgradeSuccess callback...");
+        onUpgradeSuccess(); // This closes modal and fetches subscription
+      }, 1000);
     } catch (err) {
       console.error("Payment verification error:", err);
       setError(err.message || "An error occurred during payment verification");

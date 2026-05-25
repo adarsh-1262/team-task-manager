@@ -39,27 +39,52 @@ subscriptionRoutes.get("/current", protect, async (req, res, next) => {
         subscription: null,
         plan: pricing,
         status: "free",
-        memberCount
+        memberCount,
+        debug: {
+          message: "No subscription found - returning free tier"
+        }
       });
     }
 
     // Always fetch fresh member count from database
     const memberCount = await User.countDocuments({ organization: req.organizationId });
-    const pricingPlan = getPricing(memberCount, subscription.billingCycle);
+    
+    // ✅ FIX: Use the stored tier from subscription, not calculated tier
+    // This ensures that explicitly selected tiers (like Tier 3) are preserved
+    const pricingPlan = getPricing(memberCount, subscription.billingCycle, false, subscription.currentTier);
+
+    // ✅ Validate tier consistency
+    const tierValidation = {
+      storedTier: subscription.currentTier,
+      calculatedTier: pricingPlan.tier,
+      match: subscription.currentTier === pricingPlan.tier,
+      memberLimitMatch: subscription.memberLimit === pricingPlan.memberLimit
+    };
 
     console.log(`Subscription found for org ${req.organizationId}:`, {
+      subscriptionId: subscription._id,
       status: subscription.status,
       tier: subscription.currentTier,
       billingCycle: subscription.billingCycle,
       currentPrice: subscription.currentPrice,
       memberCount: memberCount,
-      memberLimit: subscription.memberLimit
+      storedMemberLimit: subscription.memberLimit,
+      memberLimit: pricingPlan.memberLimit,
+      planTier: pricingPlan.tier,
+      tierValidation
     });
 
+    // ✅ Return comprehensive response with validation info
     res.json({
       subscription,
       plan: pricingPlan,
-      memberCount
+      memberCount,
+      debug: {
+        tierValidation,
+        message: tierValidation.match 
+          ? "✅ Tier and pricing consistent" 
+          : "⚠️ Tier mismatch - using stored tier"
+      }
     });
   } catch (error) {
     console.error("Error fetching subscription:", error);
@@ -74,7 +99,8 @@ subscriptionRoutes.post(
   requireAdmin,
   [
     body("memberCount").isInt({ min: 1 }).withMessage("Invalid member count"),
-    body("billingCycle").isIn(["monthly", "annual"]).withMessage("Invalid billing cycle")
+    body("billingCycle").isIn(["monthly", "annual"]).withMessage("Invalid billing cycle"),
+    body("selectedTier").optional().isInt({ min: 1, max: 4 }).withMessage("Invalid tier")
   ],
   async (req, res, next) => {
     try {
@@ -83,11 +109,28 @@ subscriptionRoutes.post(
         return res.status(400).json({ errors: errors.array() });
       }
 
-      const { memberCount, billingCycle } = req.body;
-      // Force minimum paid tier pricing even for small teams
-      const pricing = getPricing(memberCount, billingCycle, true);
+      const { memberCount, billingCycle, selectedTier } = req.body;
+      
+      // ✅ If user selected a specific tier, use it. Otherwise calculate based on memberCount
+      let pricing;
+      if (selectedTier) {
+        // User explicitly selected a tier - use that tier's pricing
+        console.log(`Creating order for tier ${selectedTier} (org ${req.organizationId})`);
+        pricing = getPricing(memberCount, billingCycle, false, selectedTier);
+      } else {
+        // No tier selected - use forceMinimumPaid=true as fallback (for upgrades)
+        console.log(`Creating order for org ${req.organizationId} with calculated tier`);
+        pricing = getPricing(memberCount, billingCycle, true);
+      }
 
-      console.log(`Creating order for org ${req.organizationId}, amount: ${pricing.totalPrice}`);
+      console.log(`Order details:`, { 
+        memberCount, 
+        billingCycle, 
+        selectedTier,
+        pricingTier: pricing.tier,
+        pricingMemberLimit: pricing.memberLimit,
+        totalPrice: pricing.totalPrice
+      });
 
       // Create Razorpay order
       const order = await createOrder(pricing.totalPrice, PRICING_CONFIG.CURRENCY, `Team Task Manager - ${billingCycle} subscription`);
@@ -130,7 +173,8 @@ subscriptionRoutes.post(
     body("paymentId").notEmpty().withMessage("Payment ID is required"),
     body("signature").notEmpty().withMessage("Signature is required"),
     body("memberCount").isInt({ min: 1 }).withMessage("Invalid member count"),
-    body("billingCycle").isIn(["monthly", "annual"]).withMessage("Invalid billing cycle")
+    body("billingCycle").isIn(["monthly", "annual"]).withMessage("Invalid billing cycle"),
+    body("selectedTier").optional().isInt({ min: 1, max: 4 }).withMessage("Invalid tier")
   ],
   async (req, res, next) => {
     try {
@@ -139,9 +183,9 @@ subscriptionRoutes.post(
         return res.status(400).json({ errors: errors.array() });
       }
 
-      const { orderId, paymentId, signature, memberCount, billingCycle } = req.body;
+      const { orderId, paymentId, signature, memberCount, billingCycle, selectedTier } = req.body;
 
-      console.log(`Verifying payment for org ${req.organizationId}:`, { orderId, paymentId });
+      console.log(`Verifying payment for org ${req.organizationId}:`, { orderId, paymentId, selectedTier });
 
       // Verify payment signature
       const isValid = verifyPaymentSignature(orderId, paymentId, signature);
@@ -163,9 +207,25 @@ subscriptionRoutes.post(
         return res.status(400).json({ message: `Payment not captured. Status: ${paymentDetails.status}` });
       }
 
-      // Use forceMinimumPaid=true to match what create-order used
-      // This ensures paid subscriptions get at least Tier 2 pricing
-      let pricing = getPricing(memberCount, billingCycle, true);
+      // ✅ Calculate pricing based on selected tier (if provided) or memberCount
+      let pricing;
+      if (selectedTier) {
+        // Use the tier user selected during checkout
+        console.log(`Using selected tier: ${selectedTier}`);
+        pricing = getPricing(memberCount, billingCycle, false, selectedTier);
+      } else {
+        // Fallback: use forceMinimumPaid=true (for legacy requests without selectedTier)
+        console.log("No tier selected, using forceMinimumPaid=true");
+        pricing = getPricing(memberCount, billingCycle, true);
+      }
+
+      console.log("Pricing calculated for subscription:", {
+        selectedTier,
+        pricingTier: pricing.tier,
+        pricingMemberLimit: pricing.memberLimit,
+        pricingType: pricing.type,
+        totalPrice: pricing.totalPrice
+      });
 
       // If pricing returned free tier but payment was made, use the actual payment amount
       // This handles cases where memberCount < 4 but user paid for upgrade
@@ -176,9 +236,15 @@ subscriptionRoutes.post(
       }
 
       // Validate pricing object
-      if (!pricing || pricing.memberLimit === undefined) {
+      if (!pricing || pricing.memberLimit === undefined || pricing.tier === undefined) {
         console.error("Invalid pricing object:", pricing);
         return res.status(500).json({ message: "Failed to calculate pricing" });
+      }
+
+      // ✅ Validate tier value is within acceptable range
+      if (pricing.tier < 1 || pricing.tier > 5) {
+        console.error("Invalid tier value:", pricing.tier);
+        return res.status(500).json({ message: "Invalid subscription tier" });
       }
 
       // Use actual payment amount from Razorpay, not calculated price
@@ -204,7 +270,7 @@ subscriptionRoutes.post(
           currentPrice: actualAmount,  // Use actual payment amount
           memberCount,
           memberLimit: pricing.memberLimit,
-          currentTier: pricing.tier,
+          currentTier: pricing.tier,  // ✅ Ensure correct tier is set
           renewalDate: getNextRenewalDate(billingCycle),
           razorpayPaymentId: paymentId,
           razorpayOrderId: orderId
@@ -215,7 +281,7 @@ subscriptionRoutes.post(
         subscription.currentPrice = actualAmount;  // Use actual payment amount
         subscription.memberCount = memberCount;
         subscription.memberLimit = pricing.memberLimit;
-        subscription.currentTier = pricing.tier;
+        subscription.currentTier = pricing.tier;  // ✅ Ensure correct tier is set
         subscription.renewalDate = getNextRenewalDate(billingCycle);
         subscription.razorpayPaymentId = paymentId;
         subscription.razorpayOrderId = orderId;
@@ -226,11 +292,22 @@ subscriptionRoutes.post(
         currentPrice: subscription.currentPrice,
         memberLimit: subscription.memberLimit,
         status: subscription.status,
-        tier: subscription.currentTier
+        tier: subscription.currentTier,
+        billingCycle: subscription.billingCycle
       });
 
       await subscription.save();
       console.log("Subscription saved:", subscription._id);
+      console.log("Saved subscription details:", {
+        id: subscription._id,
+        org: subscription.organization,
+        tier: subscription.currentTier,
+        memberLimit: subscription.memberLimit,
+        status: subscription.status,
+        renewalDate: subscription.renewalDate,
+        currentPrice: subscription.currentPrice,
+        billingCycle: subscription.billingCycle
+      });
 
       // Create payment record
       const payment = new Payment({
@@ -268,11 +345,24 @@ subscriptionRoutes.post(
       await invoice.save();
       console.log("Invoice created:", invoice._id);
 
+      // ✅ Fetch fresh subscription to ensure all data is correct
+      const freshSubscription = await Subscription.findById(subscription._id).populate("plan");
+      
+      console.log("Returning subscription from verify-payment:", {
+        id: freshSubscription._id,
+        tier: freshSubscription.currentTier,
+        memberLimit: freshSubscription.memberLimit,
+        status: freshSubscription.status,
+        billingCycle: freshSubscription.billingCycle,
+        currentPrice: freshSubscription.currentPrice
+      });
+
       res.json({
         message: "Payment verified and subscription created",
-        subscription,
+        subscription: freshSubscription,
         payment,
-        invoice
+        invoice,
+        success: true
       });
     } catch (error) {
       console.error("Payment verification error:", error);
