@@ -192,6 +192,7 @@ function App() {
             <Feature icon={<FolderKanban />} title="Projects" text="Teams and ownership." />
             <Feature icon={<CheckCircle2 />} title="Tasks" text="Status and overdue tracking." />
           </div>
+          <div> ⚡ Powered by <a href="https://www.asgclabs.com" target="_blank" rel="noopener noreferrer">ASGC Labs</a></div>
         </section>
         <section className="panel authPanel">
           <div className="tabs">
