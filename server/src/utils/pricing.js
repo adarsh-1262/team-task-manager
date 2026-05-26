@@ -56,7 +56,7 @@ function getTierInfo(tier) {
   }
   
   if (tier === 2) {
-    const monthlyPrice = 1;
+    const monthlyPrice = 1000;
     const annualPrice = monthlyPrice * 12 * (1 - PRICING_CONFIG.ANNUAL_DISCOUNT);
     return { tier: 2, type: "pro", monthlyPrice, annualPrice, memberLimit: 10 };
   }
