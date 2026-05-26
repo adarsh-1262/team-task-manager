@@ -23,7 +23,7 @@ app.use(helmet());
 const allowedOrigins = [
   "http://localhost:5173",           // Local development
   "http://localhost:3000",           // Alternative local
-  "https://taskmanager.asgclabs.com/", // Production frontend (Vercel)
+  "https://taskmanager.asgclabs.com", // Production frontend (Vercel)
   process.env.CLIENT_URL || "http://localhost:5173" // Production frontend from env
 ];
 
